@@ -1,0 +1,283 @@
+---
+title: "P8105_mtp_zz3309"
+author: "Zebang Zhang"
+date: 2024-10-23
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(httr)
+library(tidyverse)
+library(lubridate)
+library(ggridges)
+```
+
+## Problem1
+
+My goal is to utilize the information in the three datasets and analyze the rental price and housing price.
+
+I first extract the ZIP code data from the web, I check for columns names to see what variable it contains.
+
+```{r}
+url = "https://p8105.com/data/zip_codes.html"
+zip_code_data = read_html(url) |> 
+  html_table() |> 
+  first() |>
+  janitor::clean_names() 
+
+names(zip_code_data)
+```
+
+I find county and zip_code are important, so I also investigate their unique values.
+
+```{r}
+zip_code_data |> distinct(county)
+zip_code_data |> distinct(zip_code)
+```
+
+I find there are 320 unique zip codes and 5 unique county names, the zip_code dataset is of good quality.
+
+```{r}
+zip_code_data <- zip_code_data %>%
+  mutate(borough = case_when(
+    county == "Bronx" ~ "Bronx County",
+    county == "Kings" ~ "Kings County",
+    county == "Richmond" ~ "Richmond County",
+    county == "Queens" ~ "Queens County",
+    county == "New York" ~ "New York County"
+  )) |>
+  select(zip_code,borough,neighborhood)
+
+zip_code_data
+```
+
+A strange thing I discover is that zip code '10463' and '11201' refer to two different boroughs, but I cannot solve this issue.
+
+```{r}
+duplicate_zip <- zip_code_data %>%
+  group_by(zip_code) %>%
+  filter(n() > 1) 
+
+print(duplicate_zip)
+```
+
+Then for the NYC Rental data, I find that RegionName actually matches the zip_code, and City is all 'New York', the dataset is proper for analyzing. But there are some columns not useful for futher analysis, like 'SizeRank'.
+
+```{r}
+rental_data <- read_csv("./data/Zillow/Zip_zori_uc_sfrcondomfr_sm_month_NYC.csv")
+rental_data
+rental_data |> distinct(City)
+```
+
+I use pivot_longer() to tidy the columns whose name refer to date and put them into the variable 'date'. I restrict the dataset to only variables necessary.
+
+```{r}
+date_cols_rental <- colnames(rental_data)[grepl("^\\d{4}-\\d{2}-\\d{2}$",colnames(rental_data))]
+
+rental_data_long <- rental_data %>%
+  pivot_longer(cols = all_of(date_cols_rental), 
+               names_to = "date", 
+               values_to = "rental_price") %>%
+  mutate(date = ymd(date)) |>
+  janitor::clean_names() |>
+  select(region_name, region_type, state_name, city, county_name, date, rental_price )
+
+rental_data_long
+```
+
+Then I merge the two datasets. The issue I mentioned in the zip code data slightly impact this.
+
+```{r}
+merged_data <- rental_data_long %>%
+  left_join(zip_code_data, by = c("region_name" = "zip_code")) |>
+  select(-county_name)
+
+```
+
+For the the 2023 US Housing data, the data tidying process is similar.
+
+```{r}
+housing_2023_data <- read_csv("./data/Zillow/Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month_2023.csv")
+date_cols_housing <- colnames(housing_2023_data)[grepl("^\\d{4}-\\d{2}-\\d{2}$",colnames(housing_2023_data))]
+housing_data_long <- housing_2023_data %>%
+  pivot_longer(cols = all_of(date_cols_housing), 
+               names_to = "date", 
+               values_to = "rental_price") %>%
+  mutate(date = ymd(date)) |>
+  janitor::clean_names() |>
+  select(region_name,region_type, state_name, city, county_name, date, rental_price)
+```
+
+## Problem2
+
+```{r}
+na_ratio <- rental_data_long %>%
+  summarise(
+    total_rows = n(),
+    na_count = sum(is.na(rental_price)),
+    na_ratio = na_count / total_rows
+  )
+
+print(na_ratio)
+```
+
+There are 39.5% NA rental price, many ZIP codes have fewer than 116 observations. Maybe it is because some ZIP code area have no houses to be rented at the time or people fail to record price.
+
+```{r}
+unique_count_zip <- zip_code_data %>%
+  summarise(unique_zip_count = n_distinct(zip_code))
+
+print(unique_count_zip)
+
+unique_count_rental <- rental_data_long %>%
+  summarise(unique_rental_count = n_distinct(region_name))
+
+print(unique_count_rental) 
+```
+
+There are 320 unique zip codes in zip code dataset, while there are 149 zip codes in the NYC Rental dataset. The discrepancy may be caused by the lack of recording or the lack of rental housing in some areas.
+
+```{r}
+average_rent_by_borough_year <- merged_data %>%
+  mutate(year = year(date)) %>% 
+  group_by(borough, year) %>%
+  summarise(avg_rent = mean(rental_price, na.rm = TRUE))
+
+print(average_rent_by_borough_year)
+
+#visualize the trend
+ggplot(data = average_rent_by_borough_year, aes(x = year, y = avg_rent, color = borough, group = borough)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Average rental prices in each borough and year",
+       x = "Year",
+       y = "Average Rent") +
+  theme_minimal() + 
+  theme(legend.position = "right")
+```
+
+From about 2021, the rental price of every borough is steadily increasing.
+
+I created a table to compare rental prices in January 2021 to that in January 2020.
+
+```{r}
+#first select data in 2020-1-31 and 2021-01-31
+january_data <- merged_data %>%
+  filter(date %in% as.Date(c("2020-01-31", "2021-01-31")))
+
+compare_zip <- january_data |>
+  group_by(region_name) %>%
+  pivot_wider(names_from = date, values_from = rental_price) %>%
+  mutate(difference=`2021-01-31`-`2020-01-31`) |>
+  select(region_name,region_type, `2021-01-31`,`2020-01-31`,difference )
+  
+compare_zip
+```
+
+Show for each Borough, the largest drop in price from 2020 to 2021 and the corresponding neighborhood.
+
+```{r}
+average_rent_january <- january_data %>%
+  group_by(borough, neighborhood, year = year(date)) %>%
+  summarise(avg_rent = mean(rental_price, na.rm = TRUE))
+
+rent_comparison <- average_rent_january %>%
+  pivot_wider(names_from = year, values_from = avg_rent, names_prefix = "year_") %>%
+  mutate(drop_in_price = year_2020 - year_2021) 
+
+largest_drop_by_borough <- rent_comparison %>%
+  group_by(borough) %>%
+  filter(drop_in_price == max(drop_in_price, na.rm = TRUE)) %>%
+  select(borough,neighborhood,drop_in_price)
+
+print(largest_drop_by_borough)
+```
+
+It can be seen that the largest drop in price in Bronx County is very small, while that in New York City is the largest, that in Kings County and Queens County is close.
+
+## Problem 3
+
+Make a plot that show NYC Rental Prices within ZIP codes for all available years.
+
+```{r}
+price_across_years=ggplot(data = merged_data, aes(x = date, y = rental_price, color = borough)) +
+  geom_line(aes(group = region_name), alpha = 0.5) +  
+  facet_wrap(~ borough) +  
+  labs(title = "NYC Rental Prices by ZIP Code Across Years",
+       x = "Date",
+       y = "Rental Price") +
+  theme_minimal() +  
+  theme(legend.position = "bottom")  
+
+ggsave(filename = "results/price_across_years.png", plot = price_across_years)
+
+price_across_years
+```
+
+At about 2021, in New York County, Kings county and Queens County, there was an obvious decrease in many zip-code regions.
+
+I create a table to compute the average house price within each ZIP code over each month in 2023. 
+
+```{r}
+average_price_by_zip_month <- housing_data_long %>%
+  mutate(month = floor_date(date, "month")) %>%  
+  group_by(region_name, month) %>%
+  summarise(avg_price = mean(rental_price, na.rm = TRUE)) %>%
+  mutate(month = format(month, "%Y-%m"))
+
+print(average_price_by_zip_month)
+```
+
+Make a reader-friendly plot to show the distribution of ZIP-code-level house prices across states.
+
+```{r}
+zip_level_price <- housing_data_long %>%
+  group_by(state_name, region_name) %>%  
+  summarise(avg_price = mean(rental_price, na.rm = TRUE))  
+zip_level_price
+```
+
+```{r}
+ggplot(zip_level_price, aes(x = avg_price, y = state_name, fill = state_name)) + 
+  geom_density_ridges()
+```
+
+In every state, the ZIP-code-level house price distribution is a Normal-like distribution, with high density in the center and low density on both sides.
+
+```{r}
+ny_2023_rental <- merged_data %>%
+  filter(state_name == "NY", city == "New York", year(date) == 2023) %>%
+  group_by(region_name) %>%
+  summarise(avg_rental_price = mean(rental_price, na.rm = TRUE))
+
+ny_2023_housing <- housing_data_long %>%
+  filter(state_name == "NY", city == "New York") %>%
+  group_by(region_name) %>%
+  summarise(avg_housing_price = mean(rental_price, na.rm = TRUE))
+
+ny_2023_rental <- ny_2023_rental %>%
+  mutate(region_name = as.character(region_name))
+
+ny_2023_housing <- ny_2023_housing %>%
+  mutate(region_name = as.character(region_name))
+
+ny_rent_vs_housing <- ny_2023_rental %>%
+  inner_join(ny_2023_housing, by = "region_name")
+
+ny_rent_vs_housing
+```
+
+```{r}
+ggplot(ny_rent_vs_housing, aes(x = avg_housing_price, y = avg_rental_price)) +
+  geom_point(alpha = 0.3,color='blue') +  
+  labs(title = "Comparison of Average Rental Prices and Housing Prices in NYC ZIP Codes (2023)",
+       x = "Average Housing Price",
+       y = "Average Rental Price") +
+   geom_smooth(method = "lm", color = "green", se = FALSE)
+```
+
+Seems like housing price and rental price are positively and linearly correlated, the trend is that one will increase if the other increases.
+
+The limitations are that there are still NA values in rental price and there is an issue about zip code dataset that I previously mentioned.
